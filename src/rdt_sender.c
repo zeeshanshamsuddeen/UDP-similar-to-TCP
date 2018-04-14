@@ -30,54 +30,63 @@
 int next_seqno=0;
 int send_base=0;
 //int window_size = 3;
-int send_packet=0;
+//int send_packet=0;
 int free_space=0;
-int temp=0;
+//int temp=0;
 int sockfd, serverlen;
 struct sockaddr_in serveraddr;
 struct itimerval timer; 
 struct timeval RTT_start = {0};
 struct timeval RTT_stop ={0};
 long SampleRTT=0,EstimatedRTT=0,DevRTT=0,temp_timeout=0;
-long TimeoutInterval=1000000;  /* Initial value is set to 1 sec  */
+long TimeoutInterval=100000;  /* Initial value is set to 1 sec  */
+
+
+int WINDOW_SIZE = 1;
+int NEW_WINDOW_SIZE = 1;
+//int available_packets=0;
+
 
 tcp_packet *recvpkt;
 
-tcp_packet *sndpkt[WINDOW_SIZE];
+tcp_packet *sndpkt[MAX_WINDOW];
 
 //sigmask was not an array
 sigset_t sigmask;       
-    int turn=0;
-int wn_left=0,wn_right=2;
-int wn_left_seqno=0;
+//int turn=0;
+//int wn_left=0,wn_right=2;
+//int wn_left_seqno=0;
 int endoffile=0;
 int portno, len;
 int i,j;
 int ack_received=0;
-int window_send_base=0;
+//int window_send_base=0;
 
 char *hostname;
 char buffer[DATA_SIZE];
 FILE *fp;   
-struct timeval tp;
+//struct timeval tp;
 
-int count=0;
+//int count=0;
 int ack_to_receive=0;
 
-int timeout=0;
+//int timeout=0;
 int last_retry=0;
 int timer_seqno=0;
 int change_timer_flag=0;
+//struct timeval tp2;
+
+
+int seqno_to_send_index=0;
 
 
 void resend_packets(int sig)
 {
-    //VLOG(DEBUG,"resend_packets");
-    //VLOG(DEBUG,"resend_packets of %d",sig);
+
 
     if (sig == SIGALRM)
     {
-        for(int i=0;i<WINDOW_SIZE-free_space || endoffile==1 ;i++)
+        for( i=0;i<WINDOW_SIZE-free_space || endoffile==1 ;i++)
             {
                 VLOG(DEBUG, "timeout happened :Sending packet %d",sndpkt[i]->hdr.seqno);
                 /*  When the WINDOW contains only the endoffile packet  */
@@ -87,7 +96,13 @@ void resend_packets(int sig)
                     send_base=0;
                     ack_to_receive=0;
                     sendto(sockfd, sndpkt[i], TCP_HDR_SIZE,  0, (const struct sockaddr *)&serveraddr, serverlen);
+                    last_retry++;
+
+                    /*  TO send EOF 10 times    */
+                    if(last_retry>10)
+                        exit(0);
                     break;
+                   
                 }
                 else
                 {
@@ -102,17 +117,24 @@ void resend_packets(int sig)
                     }
                     
                 }
-               // seqno_to_send_index++;
             }
+
+            setitimer(ITIMER_REAL, &timer, NULL);
             VLOG(DEBUG,"TimeoutInterval : %lu",TimeoutInterval);
-            temp_timeout = 2 * TimeoutInterval;
-            timer.it_interval.tv_sec = temp_timeout / 1000000;    // sets an interval of the timer
-            timer.it_interval.tv_usec = temp_timeout % 1000000; 
+            TimeoutInterval = 2 * TimeoutInterval;
+            timer.it_value.tv_sec = TimeoutInterval / 1000000;
+            timer.it_value.tv_usec = TimeoutInterval % 1000000;
+            timer.it_interval.tv_sec = TimeoutInterval / 1000000;    // sets an interval of the timer
+            timer.it_interval.tv_usec = TimeoutInterval % 1000000; 
 
             /*  Flag is changed so that change_timer_stop is not invoked
                 ie. the packets in this WINDOW is not used for
                 measurement of TimeoutInterval    */
             change_timer_flag=0;
+
+            /* SLOW START THEORY = reduce window size to half*/
+            NEW_WINDOW_SIZE = WINDOW_SIZE / 2;
+       
 
     }
 }
@@ -127,7 +149,6 @@ void start_timer()
     timer.it_interval.tv_sec = TimeoutInterval / 1000000;    // sets an interval of the timer
     timer.it_interval.tv_usec = TimeoutInterval % 1000000;
 
-    //gettimeofday(&RTT_start,NULL);
 }
 
 
@@ -148,15 +169,13 @@ void change_timer_start(int sequence)
 
 void change_timer_stop()
 {
-      //  VLOG(DEBUG,"eof : %d\tresponse : %d",recvpkt->hdr.eof,recvpkt->hdr.response);
     VLOG(DEBUG,"timer stopped for %d",timer_seqno);
     gettimeofday(&RTT_stop,NULL);
 
     SampleRTT = ((RTT_stop.tv_sec-RTT_start.tv_sec)*1000000 + RTT_stop.tv_usec-RTT_start.tv_usec);
     VLOG(DEBUG,"SampleRTT %lu",SampleRTT);
-	   //  VLOG(DEBUG," initial EstimatedRTT: %lu\tDevRTT :%lu",EstimatedRTT,DevRTT);
 
-    /*	To calculate RTT of initial packet 	*/
+    /*  To calculate RTT of initial packet  */
     if(ack_to_receive==0)
     {
         EstimatedRTT = SampleRTT;
@@ -166,9 +185,10 @@ void change_timer_stop()
     {
         EstimatedRTT = (1-alpha)*EstimatedRTT + alpha*SampleRTT;
         DevRTT = (1-beta)*DevRTT + beta*(abs(SampleRTT - EstimatedRTT));
-      //  VLOG(DEBUG,"EstimatedRTT: %lu\tDevRTT :%lu",EstimatedRTT,DevRTT);
     }
 
+
+    setitimer(ITIMER_REAL, &timer, NULL);
 
     TimeoutInterval = EstimatedRTT + 4 * DevRTT;
     timer.it_value.tv_sec = TimeoutInterval / 1000000;
@@ -176,9 +196,10 @@ void change_timer_stop()
     timer.it_interval.tv_sec = TimeoutInterval / 1000000;    // sets an interval of the timer
     timer.it_interval.tv_usec = TimeoutInterval % 1000000; 
     VLOG(DEBUG,"timer : %lu--%lu ",timer.it_value.tv_sec,timer.it_value.tv_usec);
-    //VLOG(DEBUG,"eof after stoptime : %d",recvpkt->hdr.eof);
-    //timer_seqno=next_seqno;
+
     change_timer_flag=0;
+
+    
 }
 
 
@@ -244,195 +265,198 @@ int main (int argc, char **argv)
     //Stop and wait protocol
 
     init_timer(RETRY, resend_packets);  
-    int read=0;
-    int seqno_to_send_index=0;
-    free_space=WINDOW_SIZE;
+     int read=0;
+    
+   
     //sndpkt[0]=make_packet(0);
     //sndpkt[0]->hdr.seqno=-1;
 
     while (1)
     {
-        /*	Fill the free spaces in the WINDOW with contents from FILE endofile is not set,ie.enfoffile has not been sent	*/
+        WINDOW_SIZE = NEW_WINDOW_SIZE;
+        //VLOG(DEBUG,"WINDOW_SIZE : %d",WINDOW_SIZE);
+        free_space=WINDOW_SIZE;
+        /*  Fill the free spaces in the WINDOW with contents from FILE endofile is not set,ie.enfoffile has not been sent   */
         if(free_space>0 && endoffile==0 && read==0)
         {
-            /*	Starting from the initial free space to the end of WINDOW_SIZE*/
-            for(int i=WINDOW_SIZE-free_space;i<WINDOW_SIZE;i++)
-            {
-                len = fread(buffer, 1, DATA_SIZE, fp);
-                if ( len <= 0)
+                /*  Starting from the initial free space to the end of WINDOW_SIZE*/
+                for( i=WINDOW_SIZE-free_space;i<WINDOW_SIZE;i++)
                 {
-                    /*	When endoffile is reached, a packet with hdr.eof==1 is set indicating last packet 	*/
-                    VLOG(INFO, "End Of File has been reached in %dth position",i);
-                    sndpkt[i] = make_packet(0);
-                    sndpkt[i]->hdr.eof=1;
-                    /*	If there is no packet in WINDOW, set endoffile so that read will no take place again	*/
-                    if(i==0)
-                    	endoffile=1;
-                          
-                    read=1;         
-                    break;
-                }
-                
-                send_base = next_seqno;
-                next_seqno = send_base + len;
-                sndpkt[i] = make_packet(len);
-                memcpy(sndpkt[i]->data, buffer, len);
-                //VLOG(DEBUG,"sndpkt data : %s",sndpkt[i]->data);
-                sndpkt[i]->hdr.seqno = send_base;
-                //VLOG(DEBUG,"sndpkt seqno : %d\t send_base: %d",sndpkt[i]->hdr.seqno,send_base);
+                    len = fread(buffer, 1, DATA_SIZE, fp);
+                    if ( len <= 0)
+                    {
+                        /*  When endoffile is reached, a packet with hdr.eof==1 is set indicating last packet   */
+                        VLOG(INFO, "End Of File has been reached in %dth position",i);
+                        sndpkt[i] = make_packet(0);
+                        sndpkt[i]->hdr.eof=1;
+                        /*  If there is no packet in WINDOW, set endoffile so that read will no take place again    */
+                        if(i==0)
+                            endoffile=1;
+                              
+                        read=1;         
+                        break;
+                    }
+                    
+                    send_base = next_seqno;
+                    next_seqno = send_base + len;
+                    sndpkt[i] = make_packet(len);
+                    memcpy(sndpkt[i]->data, buffer, len);
+                    sndpkt[i]->hdr.seqno = send_base;
 
-                /* The no.of free spaces is reduced	*/
-                free_space--;
+                    /* The no.of free spaces is reduced */
+                    free_space--;
+
+                    
                 
+                } 
+                read=1;
             
-            } 
-            read=1;
-
         }
 
-        /*	Try to send all the packets in the WINDOW that are newly read from file */
-     	if(read==1 || endoffile==1)
+        /*  Try to send all the packets in the WINDOW that are newly read from file */
+        if(read==1 || endoffile==1)
         {
+            
+                for( i=seqno_to_send_index;i<WINDOW_SIZE-free_space || endoffile==1 ;i++)
+                {
+                    VLOG(DEBUG, "Sending packet %d",sndpkt[i]->hdr.seqno);
+                    /*  When the WINDOW contains only the endoffile packet  */
 
-            //VLOG(DEBUG,"seqno_to_send_index: %d",seqno_to_send_index);
-            for(int i=seqno_to_send_index;i<WINDOW_SIZE-free_space || endoffile==1 ;i++)
-            {
-     			VLOG(DEBUG, "Sending packet %d",sndpkt[i]->hdr.seqno);
-	            /*	When the WINDOW contains only the endoffile packet 	*/
+                    if(sndpkt[i]->hdr.eof==1 && i==0)
+                    {
+                        VLOG(DEBUG,"exit now needed");
+                        send_base=0;
+                        ack_to_receive=0;
+                        sendto(sockfd, sndpkt[i], TCP_HDR_SIZE,  0, (const struct sockaddr *)&serveraddr, serverlen);
+                        last_retry++;
 
-	            if(sndpkt[i]->hdr.eof==1 && i==0)
-	            {
-	                VLOG(DEBUG,"exit now needed");
-	                send_base=0;
-	                ack_to_receive=0;
-	                sendto(sockfd, sndpkt[i], TCP_HDR_SIZE,  0, (const struct sockaddr *)&serveraddr, serverlen);
-                    last_retry++;
+                        /*  TO send EOF 10 times    */
+                        if(last_retry>10)
+                            exit(0);
+                        break;
+                            //exit(0);
+                    }
+                    else
+                    {
+                        /* When the WINDOW contains data to be sent */
+                       if(sndpkt[i]->hdr.data_size!=0)
+                            if(sendto(sockfd, sndpkt[i], sizeof(*sndpkt[i])+sndpkt[i]->hdr.data_size, 0, ( const struct sockaddr *)&serveraddr, serverlen) < 0)
+                                error("sendto");
+                    }
+                    seqno_to_send_index++;
+                    read=0;
 
-                	/*	TO send EOF 10 times	*/
-                    if(last_retry>10)
-                        exit(0);
-	                break;
-	                    //exit(0);
-	            }
-	            else
-	            {
-	            	/* When the WINDOW contains data to be sent	*/
-	                if(sndpkt[i]->hdr.data_size!=0)
-	                    if(sendto(sockfd, sndpkt[i], sizeof(*sndpkt[i])+sndpkt[i]->hdr.data_size, 0, ( const struct sockaddr *)&serveraddr, serverlen) < 0)
-	                        error("sendto");
+                    /*  If there is no present measurement of RTT,
+                        the current packet is used   */
+                    if(change_timer_flag==0)
+                        change_timer_start(sndpkt[i]->hdr.seqno);
+            }
+        
 
-	                
-	            }
-                seqno_to_send_index++;
-                read=0;
-
-                /*  If there is no present measurement of RTT,
-                    the current packet is used   */
-                if(change_timer_flag==0)
-                    change_timer_start(sndpkt[i]->hdr.seqno);
-     		}
             
             
          }   
         while(1)
         {     
-	        start_timer();
-	        if(recvfrom(sockfd, buffer, MSS_SIZE, 0,
-	                    (struct sockaddr *) &serveraddr, (socklen_t *)&serverlen) < 0)
-	            error("recvfrom");
-	        recvpkt = (tcp_packet *)buffer;
+            start_timer();
+            if(recvfrom(sockfd, buffer, MSS_SIZE, 0,
+                        (struct sockaddr *) &serveraddr, (socklen_t *)&serverlen) < 0)
+                error("recvfrom");
+            recvpkt = (tcp_packet *)buffer;
 
-	        VLOG(DEBUG,"seqno: %d\tack_to_receive : %d\tresponse: %d",recvpkt->hdr.seqno,ack_to_receive,recvpkt->hdr.response);
+            VLOG(DEBUG,"seqno: %d\tack_to_receive : %d\tresponse: %d",recvpkt->hdr.seqno,ack_to_receive,recvpkt->hdr.response);
 
-	        /*	If the ACK received is the acknowledgment expected OR ACK of endoffile	*/
-	        if(recvpkt->hdr.seqno==ack_to_receive || recvpkt->hdr.eof==1)
-	        {
-	             //  VLOG(DEBUG,"ack_to_receive before IF first : %d",ack_to_receive);
-	            if(recvpkt->hdr.eof==1)
-	                exit(0);
-	            stop_timer();
-	        	ack_received=recvpkt->hdr.seqno;
-	            for(int i=0;i<(WINDOW_SIZE-1-free_space);i++)
-	            {
-	                *sndpkt[i]=*sndpkt[i+1];
-	                for(j=0;j<DATA_SIZE;j++)
-	                    sndpkt[i]->data[j]=sndpkt[i+1]->data[j];
-	            }
+            /*  If the ACK received is the acknowledgment expected OR ACK of endoffile  */
+            if(recvpkt->hdr.seqno==ack_to_receive || recvpkt->hdr.eof==1)
+            {
+                 //  VLOG(DEBUG,"ack_to_receive before IF first : %d",ack_to_receive);
+                if(recvpkt->hdr.eof==1)
+                    exit(0);
+                stop_timer();
+                ack_received=recvpkt->hdr.seqno;
+                for( i=0;i<(WINDOW_SIZE-1-free_space);i++)
+                {
+                    *sndpkt[i]=*sndpkt[i+1];
+                    for(j=0;j<DATA_SIZE;j++)
+                        sndpkt[i]->data[j]=sndpkt[i+1]->data[j];
+                }
 
-	            /*	If no.of free spaces is not larger that WINDOW	*/
-	            if(free_space<WINDOW_SIZE)
-	            	free_space++;
+                /*  If no.of free spaces is not larger that WINDOW  */
+                if(free_space<WINDOW_SIZE)
+                    free_space++;
 
-	            /*	set the ACK to receive next appropriatly	*/
-	            if(recvpkt->hdr.eof==0)
-		            ack_to_receive=ack_to_receive+DATA_SIZE; 
-		        else
-		        	ack_to_receive=0;
+                /*  set the ACK to receive next appropriatly    */
+                if(recvpkt->hdr.eof==0)
+                    ack_to_receive=ack_to_receive+DATA_SIZE; 
+                else
+                    ack_to_receive=0;
 
-	            seqno_to_send_index--;
-	            read=0;
+                seqno_to_send_index--;
+                //VLOG(DEBUG,"seqno_to_send_index : %d",seqno_to_send_index);
+                read=0;
 
-	            /*  When the ACK received is the ack of the packet which is being used for RTT measurement,
-	                the new TimeoutInterval is calculated   */
-	            if(recvpkt->hdr.seqno==timer_seqno && change_timer_flag==1)
-	                change_timer_stop();
+                /*  When the ACK received is the ack of the packet which is being used for RTT measurement,
+                    the new TimeoutInterval is calculated   */
+                if(recvpkt->hdr.seqno==timer_seqno && change_timer_flag==1)
+                    change_timer_stop();
 
-	          //  VLOG(DEBUG,"ack_to_receive after IF first : %d",ack_to_receive);
 
-	     
+         
 
-	        }
-	        /*	If the ACK received is ACK of earlier acknowledged packet, then the packet NEXT to that is sent	*/
-	        else if(recvpkt->hdr.seqno<ack_to_receive)
-	        {
-	        	VLOG(DEBUG,"sending seqno : %d",sndpkt[0]->hdr.seqno);
-	        	if(sendto(sockfd, sndpkt[0], sizeof(*sndpkt[0])+sndpkt[0]->hdr.data_size, 0,( const struct sockaddr *)&serveraddr, serverlen) < 0)
-	              			 error("sendto");
+            }
+            /*  If the ACK received is ACK of earlier acknowledged packet, then the packet NEXT to that is sent 
+            else if(recvpkt->hdr.seqno<ack_to_receive)
+            {
+                VLOG(DEBUG,"sending seqno : %d",sndpkt[0]->hdr.seqno);
+                if(sendto(sockfd, sndpkt[0], sizeof(*sndpkt[0])+sndpkt[0]->hdr.data_size, 0,( const struct sockaddr *)&serveraddr, serverlen) < 0)
+                             error("sendto");
 
-	        }
-	        /*	If the ACK received is that of a packet whoso earlier packets are not acknowledged,
-	        	all the previous packets in the sender WINDOW are ackowledged, 
-	        	because the ACK of the received pacekt will only be sent after all the previous packets are acknowledged	*/
-	        else if(recvpkt->hdr.seqno>ack_to_receive && endoffile==0)
-	        {
-	            stop_timer();
-	        	while(ack_to_receive<=recvpkt->hdr.seqno)
-	        	{
-	        		for(int i=0;i<WINDOW_SIZE-free_space;i++)
-	            	{
-	            		*sndpkt[i]=*sndpkt[i+1];
-		                for(j=0;j<DATA_SIZE;j++)
-		                    sndpkt[i]->data[j]=sndpkt[i+1]->data[j];
-	                   
-	            	}
-	                 /* If no.of free spaces is not larger that WINDOW  */
-	                    if(free_space<WINDOW_SIZE)
-	                        free_space++;
-	                    
-	                    if(seqno_to_send_index>0)
-	                        seqno_to_send_index--;
+            }
+            /*  If the ACK received is that of a packet whoso earlier packets are not acknowledged,
+                all the previous packets in the sender WINDOW are ackowledged, 
+                because the ACK of the received pacekt will only be sent after all the previous packets are acknowledged    */
+            else if(recvpkt->hdr.seqno>ack_to_receive && endoffile==0)
+            {
+                stop_timer();
+                while(ack_to_receive<=recvpkt->hdr.seqno)
+                {
+                    for( i=0;i<WINDOW_SIZE-free_space-1;i++)
+                    {
+                        //VLOG(DEBUG,"sndpkt hdr  %d",sndpkt[i+1]->hdr.seqno);
+                        *sndpkt[i]=*sndpkt[i+1];
+                        for(j=0;j<DATA_SIZE;j++)
+                            sndpkt[i]->data[j]=sndpkt[i+1]->data[j];
+                       
+                    }
+                     /* If no.of free spaces is not larger that WINDOW  */
+                        if(free_space<WINDOW_SIZE)
+                            free_space++;
+                        
+                        if(seqno_to_send_index>0)
+                            seqno_to_send_index--;
 
-	            	ack_to_receive=ack_to_receive+DATA_SIZE;
-	            	
-	        	}
-	            ack_received=recvpkt->hdr.seqno;    //new
-	        	read=0;
-	                  //      VLOG(DEBUG,"ack_to_receive after IF second : %d",ack_to_receive);
-	            if(recvpkt->hdr.seqno >= timer_seqno && change_timer_flag==1)
-	                change_timer_stop();
+                    ack_to_receive=ack_to_receive+DATA_SIZE;
+                    
+                }
+                ack_received=recvpkt->hdr.seqno;    //new
+                read=0;
+                if(recvpkt->hdr.seqno >= timer_seqno && change_timer_flag==1)
+                    change_timer_stop();
 
-	        }
-	        /*	When the ACK received is that of the final packet in the WINDOW	*/
-	        if(ack_received==send_base)
-	            break;
+            }
+            /*  When the ACK received is that of the final packet in the WINDOW */
+            if(ack_received==send_base){
+                /* Bases on SLOW START theory, window size for next window is increased by 1 */
+                if(WINDOW_SIZE < MAX_WINDOW)
+                    NEW_WINDOW_SIZE = WINDOW_SIZE + 1;
+                
+                break;
+            }
         }
-
-
 
     }
 
     return 0;
-
 }
 
 
